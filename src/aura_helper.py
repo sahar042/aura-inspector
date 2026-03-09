@@ -311,15 +311,15 @@ class AuraHelper:
 
 		return objects
 
-	def get_records(self, objects):
+	def get_records(self, objects, page_size=100):
 
 		results = {}
 		actions = []
 		for object_name in objects:
 			params = {
 				"entityNameOrId":object_name,
-				"layoutType":"COMPACT",
-				"pageSize":1,
+				"layoutType":"FULL",
+				"pageSize":page_size,
 				"currentPage":1,
 				"useTimeout":False,
 				"getCount":True,
@@ -339,7 +339,16 @@ class AuraHelper:
 			object_name = action_response.id
 			if action_response.is_success():
 				total_count = action_response.return_value.get('totalCount') or 0
-				results[object_name] = {'records':[],'total_count': total_count}
+				records = action_response.return_value.get('result') or action_response.return_value.get('records') or []
+				if not records:
+					for key in action_response.return_value:
+						val = action_response.return_value[key]
+						if isinstance(val, list) and len(val) > 0 and isinstance(val[0], dict):
+							records = val
+							break
+				results[object_name] = {'records': records, 'total_count': total_count}
+				if records:
+					logger.verbose(f'Retrieved {len(records)} records for {object_name}')
 			elif action_response.is_error():
 				logger.debug(f'Could not retrieve records for {object_name}: {action_response.error_message}')
 
@@ -515,6 +524,7 @@ class AuraHelper:
 		logger.verbose("Retrieving field names for objects using GraphQL")
 		banned_fields = ["CloneSourceId"] #Not handled properly by the tool (yet?)
 		banned_types = ["ADDRESS","ANYTYPE","COMPLEXVALUE"] #Not handled properly by the tool (yet?)
+		leaf_types = ["ID"] # Scalar types that don't support {value} subselection
 		object_fields_map = {}
 
 		# GraphQL apiNames is limited to 100 entries
@@ -541,10 +551,16 @@ class AuraHelper:
 
 			objects_infos = filter(None, action_response.return_value['data']['uiapi']['objectInfos'])
 			object_fields_map.update({
-				x['ApiName']: [
-					y['ApiName'] for y in x['fields']
-					if y['dataType'] not in banned_types and y['ApiName'] not in banned_fields
-				]
+				x['ApiName']: {
+					'fields': [
+						y['ApiName'] for y in x['fields']
+						if y['dataType'] not in banned_types and y['ApiName'] not in banned_fields
+					],
+					'leaf_fields': [
+						y['ApiName'] for y in x['fields']
+						if y['dataType'] in leaf_types and y['ApiName'] not in banned_fields
+					]
+				}
 				for x in objects_infos
 			})
 		return object_fields_map
@@ -624,21 +640,105 @@ class AuraHelper:
 			object_count_map.update(failed_chunks_count_map)
 		return object_count_map
 
-	def get_records_graphql(self, objects, records_per_action=2000, fetch_all=True):
+	def _build_gql_fields_query(self, fields, leaf_fields):
+		parts = []
+		leaf_set = set(leaf_fields)
+		for f in fields:
+			if f in leaf_set:
+				parts.append(f)
+			else:
+				parts.append(f"{f}{{value}}")
+		return " ".join(parts)
+
+	def _fetch_gql_records_for_object(self, object_name, fields, leaf_fields, page_size=50):
+		all_records = []
+		fields_query = self._build_gql_fields_query(fields, leaf_fields)
+		query = f'query getData{{uiapi{{query{{{object_name}(first:{page_size}){{edges{{node{{{fields_query}}}}}}}}}}}}}'
+
+		action = AuraActionHelper.build_action(
+			object_name,
+			'aura://RecordUiController/ACTION$executeGraphQL',
+			{'queryInput':{'operationName':'getData','query':query,'variables':{}}}
+		)
+
+		action_response = self.send_aura_bulk(action).actions_responses[0]
+		if not action_response.is_success():
+			return None, action_response.error_message if action_response.is_error() else 'Unknown error'
+
+		return_value = action_response.return_value
+
+		if 'errors' in return_value and return_value['errors']:
+			logger.debug(f'GraphQL errors for {object_name}: {return_value["errors"]}')
+			bad_fields = set()
+			for error in return_value.get('errors', []):
+				msg = error.get('message', '')
+				if 'SubselectionNotAllowed' in msg:
+					match = re.search(r'/node/(\w+)', msg)
+					if match:
+						bad_fields.add(match.group(1))
+				elif 'FieldUndefined' in msg:
+					bad = re.findall(r"'([^']+)'", msg)
+					bad_fields.update(bad)
+
+			if bad_fields:
+				logger.verbose(f'Retrying {object_name} moving problematic fields to leaf: {bad_fields}')
+				new_leaf = list(set(leaf_fields) | bad_fields)
+				remaining = [f for f in fields if f not in bad_fields or f in bad_fields]
+				return self._fetch_gql_records_for_object(object_name, remaining, new_leaf, page_size)
+
+		if 'data' in return_value and 'uiapi' in return_value.get('data', {}):
+			query_data = return_value['data']['uiapi']['query'].get(object_name)
+			if query_data and 'edges' in query_data:
+				for edge in query_data['edges']:
+					node = edge.get('node', {})
+					record = {}
+					for field_name, field_data in node.items():
+						if isinstance(field_data, dict) and 'value' in field_data:
+							record[field_name] = field_data['value']
+						elif not isinstance(field_data, dict):
+							record[field_name] = field_data
+					if record:
+						all_records.append(record)
+
+		return all_records, None
+
+	def get_records_graphql(self, objects, records_per_action=100, fetch_all=True):
 		results = {}
 
-		#Retrieve field names for each object and validate that they can be accessed with uiapi
 		object_fields_map = self.get_graphql_fields_for_objects(objects)
 		uiapi_objects = list(object_fields_map.keys())
 		logger.info(f"{len(uiapi_objects)} objects accessible with GraphQL through uiapi")
 
 		logger.info("Hang tight - this may take a while")
 
-		#Retrieve object counts for each object to only retrieve records for those
 		object_count_map = self.get_object_count_graphql(uiapi_objects)
 		objects_with_records = [object_name for object_name in object_count_map if object_count_map[object_name] != 0]
 		results = {k: {'records': [], 'total_count': v} for k, v in object_count_map.items() if v != 0}
 		logger.info(f"{len(objects_with_records)} objects with records for a total of {sum(object_count_map.values())} records")
+
+		for object_name in objects_with_records:
+			field_info = object_fields_map.get(object_name, {})
+			fields = field_info.get('fields', [])
+			leaf_fields = field_info.get('leaf_fields', [])
+			if not fields:
+				logger.debug(f'No fields found for {object_name}, skipping data fetch')
+				continue
+
+			logger.verbose(f'Fetching records for {object_name} ({object_count_map[object_name]} records, {len(fields)} fields)')
+			page_size = min(records_per_action, 50)
+
+			try:
+				records, error = self._fetch_gql_records_for_object(object_name, fields, leaf_fields, page_size)
+				if records is not None:
+					if records:
+						logger.verbose(f'Retrieved {len(records)} records for {object_name} via GraphQL')
+					results[object_name]['records'] = records
+				else:
+					logger.debug(f'Error fetching records for {object_name}: {error}')
+			except Exception:
+				logger.error(f'Error while fetching GraphQL records for {object_name}')
+				logger.debug(traceback.format_exc())
+
 		return results
 
 	def get_custom_controllers(self):
