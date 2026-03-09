@@ -78,6 +78,23 @@ To run the tool in an authenticated context, either supply the SID cookie using 
 
 `python3 aura_cli.py -r <AURA_REQUEST_FILE>`
 
+## Extracting Record Data
+
+This is a modified version of the original [google/aura-inspector](https://github.com/google/aura-inspector). The original tool only counts records per object but never extracts the actual data. This fork adds full record extraction.
+
+To extract all accessible record data and save it to a directory:
+
+`python3 aura_cli.py -u <URL> -o ./results`
+
+This will create:
+- `results/records/` - JSON files with record data fetched via the standard Aura API
+- `results/gql_records/` - JSON files with record data fetched via GraphQL (more objects, more fields)
+- `results/misc/` - CSP trusted sites, record list URLs, and custom controllers
+
+You can also target specific objects:
+
+`python3 aura_cli.py -u <URL> -l User,ContentDocument,CspTrustedSite -o ./results`
+
 ## Handling Multiple Apps
 
 A single instance could have multiple custom apps hosted on it. This could typically be identified if you see something along the lines of `/<custom-app-name>/s` in the path. If this is the case, we recommend finding all apps, and specifying them using the `--app` parameter, as the output could differ significantly. It's also advised to try run the tool against the default app "/" if there are any custom apps hosted on the instance.
@@ -85,3 +102,6 @@ A single instance could have multiple custom apps hosted on it. This could typic
 # Developed By:
 - Amine Ismail
 - Anirudha Kanodia
+
+# Modified By:
+- Sahar Shlichove
