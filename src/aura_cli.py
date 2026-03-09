@@ -117,6 +117,14 @@ def write_records_to_directory(all_records, parent_dir, sub_dir):
 	with open(os.path.join(path_to_write, f'summary.txt'), 'w') as f:
 		f.write(draw_table(all_records))
 
+	for object_name, data in all_records.items():
+		records = data.get('records', [])
+		if records:
+			object_file = os.path.join(path_to_write, f'{object_name}.json')
+			with open(object_file, 'w') as f:
+				json.dump(records, f, indent=2, default=str)
+			logger.info(f'Wrote {len(records)} records for {object_name} to {object_file}')
+
 
 def write_misc_to_directory(obj_to_write, parent_dir, sub_dir='misc', file_name=''):
 	
