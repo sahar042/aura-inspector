@@ -24,7 +24,7 @@ import os
 import signal
 from urllib.parse import parse_qs
 
-def audit(url, cookies, object_list, output_dir, proxy, fetch_max_data=False, insecure=False, app=None, aura_path="/aura", context=None, token="null", no_gql=False):
+def audit(url, cookies, object_list, output_dir, proxy, fetch_all=False, insecure=False, app=None, aura_path="/aura", context=None, token="null", no_gql=False):
 
 	aura = AuraHelper(url=url, cookies=cookies, proxy=proxy, insecure=insecure, app=app, aura=aura_path, context=context, token=token)
 
@@ -58,11 +58,9 @@ def audit(url, cookies, object_list, output_dir, proxy, fetch_max_data=False, in
 
 	all_records = []
 	all_records_gql = []
-	if not fetch_max_data:
-		# Get records of all objects
-		all_records = aura.get_records(objects)
-		if aura.gql_enabled:
-			all_records_gql = aura.get_records_graphql(objects, records_per_action=100, fetch_all=False)
+	all_records = aura.get_records(objects, fetch_all=fetch_all)
+	if aura.gql_enabled:
+		all_records_gql = aura.get_records_graphql(objects, records_per_action=100, fetch_all=fetch_all)
 	all_ui_lists = dict()
 
 
@@ -232,6 +230,7 @@ def main():
 	parser.add_argument("--context", help="Provide a context to be used as aura.context in POST requests, the script will use a dummy one if not provided")
 	parser.add_argument("--token", help="Provide an aura token to be used as aura.token in POST requests, the script will use a dummy one if not provided")
 	parser.add_argument("--no-gql", help="Do not check for GraphQL capability and do not use it", action="store_true")
+	parser.add_argument("--fetch-all", help="Fetch all records using pagination instead of only the first page", action="store_true")
 	parser.add_argument("--no-banner", help="Do not display banner", action="store_true")
 	parser.add_argument("-r", "--aura-request-file", help="Provide a request file to an /aura endpoint")
 
@@ -293,6 +292,7 @@ def main():
 		object_list=object_list,
 		output_dir=args.output_dir,
 		proxy=args.proxy,
+		fetch_all=args.fetch_all,
 		insecure=args.insecure,
 		app=app,
 		aura_path=aura,
