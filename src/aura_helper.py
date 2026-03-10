@@ -311,7 +311,7 @@ class AuraHelper:
 
 		return objects
 
-	def get_records(self, objects, page_size=100):
+	def get_records(self, objects, page_size=100, fetch_all=False):
 
 		results = {}
 		actions = []
@@ -351,6 +351,51 @@ class AuraHelper:
 					logger.verbose(f'Retrieved {len(records)} records for {object_name}')
 			elif action_response.is_error():
 				logger.debug(f'Could not retrieve records for {object_name}: {action_response.error_message}')
+
+		if fetch_all:
+			for object_name in list(results.keys()):
+				total_count = results[object_name]['total_count']
+				fetched = len(results[object_name]['records'])
+				if fetched > 0 and fetched < total_count:
+					current_page = 2
+					while fetched < total_count:
+						logger.verbose(f'Fetching page {current_page} for {object_name} ({fetched}/{total_count} records)')
+						action = AuraActionHelper.build_action(
+							object_name,
+							"serviceComponent://ui.force.components.controllers.lists.selectableListDataProvider.SelectableListDataProviderController/ACTION$getItems",
+							{
+								"entityNameOrId":object_name,
+								"layoutType":"FULL",
+								"pageSize":page_size,
+								"currentPage":current_page,
+								"useTimeout":False,
+								"getCount":False,
+								"enableRowActions":False
+							}
+						)
+						try:
+							page_response = self.send_aura_bulk(action).actions_responses[0]
+							if page_response.is_success():
+								page_records = page_response.return_value.get('result') or page_response.return_value.get('records') or []
+								if not page_records:
+									for key in page_response.return_value:
+										val = page_response.return_value[key]
+										if isinstance(val, list) and len(val) > 0 and isinstance(val[0], dict):
+											page_records = val
+											break
+								if not page_records:
+									break
+								results[object_name]['records'].extend(page_records)
+								fetched += len(page_records)
+								current_page += 1
+							else:
+								logger.debug(f'Stopped paginating {object_name} at page {current_page}')
+								break
+						except Exception:
+							logger.error(f'Error while paginating records for {object_name}')
+							logger.debug(traceback.format_exc())
+							break
+					logger.verbose(f'Retrieved {len(results[object_name]["records"])} total records for {object_name}')
 
 		logger.info(f'Retrieved information for {len(results)} objects')
 		return results
@@ -650,66 +695,85 @@ class AuraHelper:
 				parts.append(f"{f}{{value}}")
 		return " ".join(parts)
 
-	def _fetch_gql_records_for_object(self, object_name, fields, leaf_fields, page_size=50):
+	def _fetch_gql_records_for_object(self, object_name, fields, leaf_fields, page_size=50, fetch_all=False):
 		all_records = []
 		fields_query = self._build_gql_fields_query(fields, leaf_fields)
-		query = f'query getData{{uiapi{{query{{{object_name}(first:{page_size}){{edges{{node{{{fields_query}}}}}}}}}}}}}'
+		cursor = None
+		has_next = True
 
-		action = AuraActionHelper.build_action(
-			object_name,
-			'aura://RecordUiController/ACTION$executeGraphQL',
-			{'queryInput':{'operationName':'getData','query':query,'variables':{}}}
-		)
+		while has_next:
+			after_clause = f',after:"{cursor}"' if cursor else ''
+			query = f'query getData{{uiapi{{query{{{object_name}(first:{page_size}{after_clause}){{edges{{node{{{fields_query}}}}}pageInfo{{hasNextPage,endCursor}}}}}}}}}}'
 
-		action_response = self.send_aura_bulk(action).actions_responses[0]
-		if not action_response.is_success():
-			return None, action_response.error_message if action_response.is_error() else 'Unknown error'
+			action = AuraActionHelper.build_action(
+				object_name,
+				'aura://RecordUiController/ACTION$executeGraphQL',
+				{'queryInput':{'operationName':'getData','query':query,'variables':{}}}
+			)
 
-		return_value = action_response.return_value
+			action_response = self.send_aura_bulk(action).actions_responses[0]
+			if not action_response.is_success():
+				return None, action_response.error_message if action_response.is_error() else 'Unknown error'
 
-		if 'errors' in return_value and return_value['errors']:
-			logger.debug(f'GraphQL errors for {object_name}: {return_value["errors"]}')
-			bad_fields = set()
-			for error in return_value.get('errors', []):
-				msg = error.get('message', '')
-				if 'SubselectionNotAllowed' in msg:
-					match = re.search(r'/node/(\w+)', msg)
-					if match:
-						bad_fields.add(match.group(1))
-				elif 'FieldUndefined' in msg:
-					bad = re.findall(r"'([^']+)'", msg)
-					bad_fields.update(bad)
+			return_value = action_response.return_value
 
-			if bad_fields:
-				logger.verbose(f'Retrying {object_name} moving problematic fields to leaf: {bad_fields}')
-				new_leaf = list(set(leaf_fields) | bad_fields)
-				remaining = [f for f in fields if f not in bad_fields or f in bad_fields]
-				return self._fetch_gql_records_for_object(object_name, remaining, new_leaf, page_size)
+			if 'errors' in return_value and return_value['errors']:
+				logger.debug(f'GraphQL errors for {object_name}: {return_value["errors"]}')
+				bad_fields = set()
+				for error in return_value.get('errors', []):
+					msg = error.get('message', '')
+					if 'SubselectionNotAllowed' in msg:
+						match = re.search(r'/node/(\w+)', msg)
+						if match:
+							bad_fields.add(match.group(1))
+					elif 'FieldUndefined' in msg:
+						bad = re.findall(r"'([^']+)'", msg)
+						bad_fields.update(bad)
 
-		if 'data' in return_value and 'uiapi' in return_value.get('data', {}):
-			query_data = return_value['data']['uiapi']['query'].get(object_name)
-			if query_data and 'edges' in query_data:
-				for edge in query_data['edges']:
-					node = edge.get('node', {})
-					record = {}
-					for field_name, field_data in node.items():
-						if isinstance(field_data, dict) and 'value' in field_data:
-							record[field_name] = field_data['value']
-						elif not isinstance(field_data, dict):
-							record[field_name] = field_data
-					if record:
-						all_records.append(record)
+				if bad_fields:
+					logger.verbose(f'Retrying {object_name} moving problematic fields to leaf: {bad_fields}')
+					new_leaf = list(set(leaf_fields) | bad_fields)
+					remaining = [f for f in fields if f not in bad_fields or f in bad_fields]
+					return self._fetch_gql_records_for_object(object_name, remaining, new_leaf, page_size, fetch_all)
+
+			if 'data' in return_value and 'uiapi' in return_value.get('data', {}):
+				query_data = return_value['data']['uiapi']['query'].get(object_name)
+				if query_data and 'edges' in query_data:
+					for edge in query_data['edges']:
+						node = edge.get('node', {})
+						record = {}
+						for field_name, field_data in node.items():
+							if isinstance(field_data, dict) and 'value' in field_data:
+								record[field_name] = field_data['value']
+							elif not isinstance(field_data, dict):
+								record[field_name] = field_data
+						if record:
+							all_records.append(record)
+
+					page_info = query_data.get('pageInfo', {})
+					if fetch_all and page_info.get('hasNextPage', False):
+						cursor = page_info.get('endCursor')
+						logger.verbose(f'Fetched {len(all_records)} records so far for {object_name}, fetching next page...')
+					else:
+						has_next = False
+				else:
+					has_next = False
+			else:
+				has_next = False
 
 		return all_records, None
 
-	def get_records_graphql(self, objects, records_per_action=100, fetch_all=True):
+	def get_records_graphql(self, objects, records_per_action=100, fetch_all=False):
 		results = {}
 
 		object_fields_map = self.get_graphql_fields_for_objects(objects)
 		uiapi_objects = list(object_fields_map.keys())
 		logger.info(f"{len(uiapi_objects)} objects accessible with GraphQL through uiapi")
 
-		logger.info("Hang tight - this may take a while")
+		if fetch_all:
+			logger.info("Fetching ALL records (pagination enabled) - this may take a while")
+		else:
+			logger.info("Hang tight - this may take a while")
 
 		object_count_map = self.get_object_count_graphql(uiapi_objects)
 		objects_with_records = [object_name for object_name in object_count_map if object_count_map[object_name] != 0]
@@ -728,7 +792,7 @@ class AuraHelper:
 			page_size = min(records_per_action, 50)
 
 			try:
-				records, error = self._fetch_gql_records_for_object(object_name, fields, leaf_fields, page_size)
+				records, error = self._fetch_gql_records_for_object(object_name, fields, leaf_fields, page_size, fetch_all)
 				if records is not None:
 					if records:
 						logger.verbose(f'Retrieved {len(records)} records for {object_name} via GraphQL')
