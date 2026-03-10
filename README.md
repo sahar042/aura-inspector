@@ -59,6 +59,7 @@ options:
   --context CONTEXT     Provide a context to be used as aura.context in POST requests, the script will use a dummy one if not provided
   --token TOKEN         Provide an aura token to be used as aura.token in POST requests, the script will use a dummy one if not provided
   --no-gql              Do not check for GraphQL capability and do not use it
+  --fetch-all           Fetch all records using pagination instead of only the first page
   --no-banner           Do not display banner
   -r, --aura-request-file AURA_REQUEST_FILE
                         Provide a request file to an /aura endpoint
@@ -90,6 +91,10 @@ This will create:
 - `results/records/` - JSON files with record data fetched via the standard Aura API
 - `results/gql_records/` - JSON files with record data fetched via GraphQL (more objects, more fields)
 - `results/misc/` - CSP trusted sites, record list URLs, and custom controllers
+
+By default, the tool fetches only the first page of records (100 for Aura, 50 for GraphQL). To fetch **all** records using pagination:
+
+`python3 aura_cli.py -u <URL> -o ./results --fetch-all`
 
 You can also target specific objects:
 
