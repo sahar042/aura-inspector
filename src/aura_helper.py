@@ -250,7 +250,12 @@ class AuraHelper:
 				logger.critical('Invalid session when trying to get context, guest access might be disabled, aborting')
 				exit()
 			elif fwuid is None:
-				json_resp_data = json.loads(resp_data)
+				try:
+					json_resp_data = json.loads(resp_data)
+				except json.JSONDecodeError:
+					logger.critical('Could not parse aura response (non-JSON response received). The target may be unreachable, misconfigured, or guest access may be disabled.')
+					logger.debug(f'Response body: {resp_data[:500]}')
+					exit()
 				if 'context' in json_resp_data:
 					fwuid = json_resp_data['context']['fwuid']
 				else:
