@@ -24,7 +24,7 @@ import os
 import signal
 from urllib.parse import parse_qs
 
-def audit(url, cookies, object_list, output_dir, proxy, fetch_max_data=False, insecure=False, app=None, aura_path="/aura", context=None, token="null", no_gql=False):
+def audit(url, cookies, object_list, output_dir, proxy, fetch_all=False, insecure=False, app=None, aura_path="/aura", context=None, token="null", no_gql=False, no_deep=False, no_files=False, search_terms=None):
 
 	aura = AuraHelper(url=url, cookies=cookies, proxy=proxy, insecure=insecure, app=app, aura=aura_path, context=context, token=token)
 
@@ -58,13 +58,74 @@ def audit(url, cookies, object_list, output_dir, proxy, fetch_max_data=False, in
 
 	all_records = []
 	all_records_gql = []
-	if not fetch_max_data:
-		# Get records of all objects
-		all_records = aura.get_records(objects)
-		if aura.gql_enabled:
-			all_records_gql = aura.get_records_graphql(objects, records_per_action=100, fetch_all=False)
+	all_records = aura.get_records(objects, fetch_all=fetch_all)
+	if aura.gql_enabled:
+		all_records_gql = aura.get_records_graphql(objects, records_per_action=100, fetch_all=fetch_all)
 	all_ui_lists = dict()
 
+	# Deep extraction
+	custom_controller_data = {}
+	rest_records = {}
+	related_records = {}
+	search_results = {}
+	chatter_data = {}
+	reports_data = {}
+	dashboards_data = {}
+	tooling_data = {}
+	metadata_describe = {}
+	knowledge_data = {}
+	custom_settings_data = {}
+	aura_component_defs = {}
+	apex_rest_endpoints = {}
+	bulk_results = {}
+	deleted_records = {}
+	record_counts = {}
+	connect_data = {}
+	wave_data = {}
+	ui_api_records = {}
+	process_data = {}
+
+	if not no_deep:
+		if custom_controllers:
+			custom_controller_data = aura.invoke_custom_controllers(custom_controllers)
+
+		rest_records = aura.extract_via_rest_api(objects)
+
+		all_sources = [s for s in [all_records, all_records_gql, rest_records] if s]
+		related_records = aura.extract_related_records(*all_sources)
+
+		search_results = aura.search_records(search_terms=search_terms)
+
+		chatter_data = aura.get_chatter_feeds()
+
+		reports_data = aura.get_reports_data()
+		dashboards_data = aura.get_dashboards_data()
+
+		metadata_describe = aura.extract_metadata_describe(objects)
+		knowledge_data = aura.extract_knowledge_articles()
+		custom_settings_data = aura.extract_custom_settings()
+		aura_component_defs = aura.extract_aura_component_defs()
+		apex_rest_endpoints = aura.discover_apex_rest_endpoints()
+
+		deleted_records = aura.extract_deleted_records(objects)
+		record_counts = aura.extract_record_counts()
+		connect_data = aura.extract_connect_api_data()
+		wave_data = aura.extract_wave_analytics()
+		process_data = aura.extract_process_data()
+
+		# UI API: use record IDs from all sources
+		all_ids = set()
+		for src in [all_records, all_records_gql, rest_records]:
+			if not src:
+				continue
+			for obj_data in src.values():
+				for rec in obj_data.get('records', []):
+					if isinstance(rec, dict):
+						rid = rec.get('Id') or rec.get('id')
+						if rid:
+							all_ids.add(rid)
+		if all_ids:
+			ui_api_records = aura.extract_ui_api_records(list(all_ids)[:200])
 
 	# Get UI list for records
 	recordlists = aura.get_records_ui_list(objects)
@@ -78,6 +139,52 @@ def audit(url, cookies, object_list, output_dir, proxy, fetch_max_data=False, in
 	if aura.gql_enabled:
 		print('--- Summary GraphQL ---')
 		print(draw_table(all_records_gql))
+		print('')
+	if rest_records:
+		print('--- Summary REST API ---')
+		print(draw_table(rest_records))
+		print('')
+
+	if deleted_records:
+		print('--- Summary Deleted/Archived Records ---')
+		print(draw_table(deleted_records))
+		print('')
+
+	deep_items = [
+		('Custom controller results', custom_controller_data),
+		('Related records fetched', related_records),
+		('Chatter feed sources', chatter_data),
+		('Reports extracted', reports_data),
+		('Dashboards extracted', dashboards_data),
+		('Tooling API artifacts', tooling_data),
+		('Object metadata described', {k: v for k, v in metadata_describe.items() if k != '_global'}),
+		('Custom Settings/Metadata', custom_settings_data),
+		('Aura component defs', aura_component_defs),
+		('Apex REST endpoints', apex_rest_endpoints),
+		('Bulk API exports', bulk_results),
+		('Deleted/archived records', deleted_records),
+		('Connect API sources', connect_data),
+		('Wave/Analytics items', wave_data),
+		('UI API records', ui_api_records),
+		('Process data (approvals/rules)', process_data),
+	]
+	has_deep = any(v for _, v in deep_items)
+	has_knowledge = knowledge_data.get('rest') or knowledge_data.get('aura')
+	has_search = search_results.get('sosl') or search_results.get('aura')
+	if has_deep or has_knowledge or has_search or record_counts:
+		print('--- Deep Extraction Summary ---')
+		for label, data in deep_items:
+			if data:
+				print(f'  {label}: {len(data)}')
+		if record_counts:
+			print(f'  Record counts enumerated: {len(record_counts)} objects')
+		if has_knowledge:
+			rest_count = len(knowledge_data.get('rest', []))
+			print(f'  Knowledge articles: {rest_count} REST' + (', Aura data present' if knowledge_data.get('aura') else ''))
+		sosl_count = sum(len(v) for v in search_results.get('sosl', {}).values())
+		aura_search_count = len(search_results.get('aura', {}))
+		if sosl_count or aura_search_count:
+			print(f'  Search results: {sosl_count} SOSL records, {aura_search_count} Aura result sets')
 		print('')
 
 	if not output_dir:
@@ -96,12 +203,57 @@ def audit(url, cookies, object_list, output_dir, proxy, fetch_max_data=False, in
 	if output_dir:
 		write_records_to_directory(all_records, output_dir, "records")
 		write_records_to_directory(all_records_gql, output_dir, "gql_records")
-		write_misc_to_directory(recordlists, output_dir, sub_dir='misc',file_name='recordlists.json')
-		write_misc_to_directory(home_urls, output_dir, sub_dir='misc',file_name='homeurls.json')
-		write_misc_to_directory(aura.csp_trusted, output_dir, sub_dir='misc',file_name='csp_trusted_sites.json')
-		write_misc_to_directory(custom_controllers, output_dir, sub_dir='misc',file_name='custom_controllers.json')
-		
-		logger.info(f'Please check the {output_dir} folder for retrieved records, object home URLs and records UI list record URLs')
+		write_records_to_directory(rest_records, output_dir, "rest_records")
+		write_misc_to_directory(recordlists, output_dir, sub_dir='misc', file_name='recordlists.json')
+		write_misc_to_directory(home_urls, output_dir, sub_dir='misc', file_name='homeurls.json')
+		write_misc_to_directory(aura.csp_trusted, output_dir, sub_dir='misc', file_name='csp_trusted_sites.json')
+		write_misc_to_directory(custom_controllers, output_dir, sub_dir='misc', file_name='custom_controllers.json')
+		write_misc_to_directory(custom_controller_data, output_dir, sub_dir='misc', file_name='custom_controller_data.json')
+		write_misc_to_directory(related_records, output_dir, sub_dir='misc', file_name='related_records.json')
+		if search_results.get('sosl') or search_results.get('aura'):
+			write_misc_to_directory(search_results, output_dir, sub_dir='misc', file_name='search_results.json')
+		write_misc_to_directory(chatter_data, output_dir, sub_dir='misc', file_name='chatter_feeds.json')
+		write_misc_to_directory(reports_data, output_dir, sub_dir='misc', file_name='reports.json')
+		write_misc_to_directory(dashboards_data, output_dir, sub_dir='misc', file_name='dashboards.json')
+		write_misc_to_directory(metadata_describe, output_dir, sub_dir='misc', file_name='metadata_describe.json')
+		if knowledge_data.get('rest') or knowledge_data.get('aura'):
+			write_misc_to_directory(knowledge_data, output_dir, sub_dir='misc', file_name='knowledge_articles.json')
+		write_misc_to_directory(custom_settings_data, output_dir, sub_dir='misc', file_name='custom_settings.json')
+		write_misc_to_directory(aura_component_defs, output_dir, sub_dir='misc', file_name='aura_component_defs.json')
+		write_misc_to_directory(apex_rest_endpoints, output_dir, sub_dir='misc', file_name='apex_rest_endpoints.json')
+		write_records_to_directory(deleted_records, output_dir, "deleted_records")
+		write_misc_to_directory(record_counts, output_dir, sub_dir='misc', file_name='record_counts.json')
+		write_misc_to_directory(connect_data, output_dir, sub_dir='misc', file_name='connect_api.json')
+		write_misc_to_directory(wave_data, output_dir, sub_dir='misc', file_name='wave_analytics.json')
+		write_misc_to_directory(ui_api_records, output_dir, sub_dir='misc', file_name='ui_api_records.json')
+		write_misc_to_directory(process_data, output_dir, sub_dir='misc', file_name='process_data.json')
+
+		if not no_deep:
+			# Tooling API writes source code directly during extraction
+			tooling_data = aura.extract_tooling_api(output_dir)
+			# Bulk API exports CSVs directly
+			bulk_results = aura.extract_via_bulk_api(objects, output_dir)
+
+		# File and binary downloads (after output_dir is confirmed)
+		if not no_files:
+			all_sources = [s for s in [all_records, all_records_gql, rest_records] if s]
+			downloaded = aura.download_content_files(all_sources, output_dir)
+			if downloaded:
+				print(f'  Downloaded {len(downloaded)} ContentVersion/ContentDocument files')
+
+			sr_downloaded = aura.download_static_resources(all_sources, output_dir)
+			if sr_downloaded:
+				print(f'  Downloaded {len(sr_downloaded)} Static Resources')
+
+			att_downloaded = aura.download_legacy_attachments(all_sources, output_dir)
+			if att_downloaded:
+				print(f'  Downloaded {len(att_downloaded)} legacy Attachments')
+
+			doc_downloaded = aura.download_legacy_documents(all_sources, output_dir)
+			if doc_downloaded:
+				print(f'  Downloaded {len(doc_downloaded)} legacy Documents')
+
+		logger.info(f'Please check the {output_dir} folder for all extracted data')
 		logger.warning('The object home URLs and records UI list need to be checked manually at the moment to verify whether any sensitive data or panel is available')
 
 
@@ -232,7 +384,11 @@ def main():
 	parser.add_argument("--context", help="Provide a context to be used as aura.context in POST requests, the script will use a dummy one if not provided")
 	parser.add_argument("--token", help="Provide an aura token to be used as aura.token in POST requests, the script will use a dummy one if not provided")
 	parser.add_argument("--no-gql", help="Do not check for GraphQL capability and do not use it", action="store_true")
+	parser.add_argument("--fetch-all", help="Fetch all records using pagination instead of only the first page", action="store_true")
 	parser.add_argument("--no-banner", help="Do not display banner", action="store_true")
+	parser.add_argument("--no-deep", help="Skip deep extraction (REST SOQL, search, related records, chatter, reports, dashboards, custom controller invocation)", action="store_true")
+	parser.add_argument("--no-files", help="Skip downloading ContentVersion/ContentDocument file blobs", action="store_true")
+	parser.add_argument("--search-terms", help="Comma-separated search terms for SOSL/Aura search (default: common sensitive keywords)", type=str, default=None)
 	parser.add_argument("-r", "--aura-request-file", help="Provide a request file to an /aura endpoint")
 
 	args = parser.parse_args()
@@ -289,16 +445,24 @@ def main():
 	if object_list:
 		object_list = [str(obj) for obj in object_list.split(",")]
 
+	search_terms = args.search_terms
+	if search_terms:
+		search_terms = [t.strip() for t in search_terms.split(",")]
+
 	audit(url, cookies=cookies,
 		object_list=object_list,
 		output_dir=args.output_dir,
 		proxy=args.proxy,
+		fetch_all=args.fetch_all,
 		insecure=args.insecure,
 		app=app,
 		aura_path=aura,
 		context=context,
 		token=token,
-		no_gql=args.no_gql
+		no_gql=args.no_gql,
+		no_deep=args.no_deep,
+		no_files=args.no_files,
+		search_terms=search_terms,
     )
 
 if __name__ == "__main__":
