@@ -122,6 +122,10 @@ By default, the tool fetches only the first page of records (100 for Aura, 50 fo
 
 `python3 aura_cli.py -u <URL> -o ./results --fetch-all`
 
+By default, the tool fetches only the first page of records (100 for Aura, 50 for GraphQL). To fetch **all** records using pagination:
+
+`python3 aura_cli.py -u <URL> -o ./results --fetch-all`
+
 You can also target specific objects:
 
 `python3 aura_cli.py -u <URL> -l User,ContentDocument,CspTrustedSite -o ./results`
